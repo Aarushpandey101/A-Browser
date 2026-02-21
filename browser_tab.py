@@ -1,26 +1,51 @@
 # browser_tab.py
 
 from PyQt6.QtCore import QUrl
-from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+from PyQt6.QtWebEngineCore import QWebEngineProfile
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+
+from adblocker import AdBlocker
 
 
 class BrowserTab(QWebEngineView):
-    """Single browser tab bound to a specific QWebEngineProfile."""
+    """Browser tab with shared profile + toggleable adblock."""
 
-    def __init__(self, profile: QWebEngineProfile, url: str = "about:blank") -> None:
+    _shared_adblocker: AdBlocker | None = None
+    _shared_profile: QWebEngineProfile | None = None
+    _profile_key: tuple[str, bool] | None = None
+
+    def __init__(self, url: str, storage_path: str, incognito: bool = False) -> None:
         super().__init__()
-        self._is_new_tab_page = False
-        self.setPage(QWebEnginePage(profile, self))
+        self._ensure_profile(storage_path, incognito)
+        self.setPage(BrowserTab._shared_profile.newPage())
         self.load(QUrl(url))
 
-    def show_new_tab_page(self, html: str) -> None:
-        self._is_new_tab_page = True
-        self.setHtml(html, QUrl("https://newtab.local/"))
+    @classmethod
+    def _ensure_profile(cls, storage_path: str, incognito: bool) -> None:
+        profile_key = (storage_path, incognito)
+        if cls._shared_profile is not None and cls._profile_key == profile_key:
+            return
 
-    def mark_as_web_page(self) -> None:
-        self._is_new_tab_page = False
+        cls.reset_profile()
 
-    @property
-    def is_new_tab_page(self) -> bool:
-        return self._is_new_tab_page
+        if incognito:
+            cls._shared_profile = QWebEngineProfile()
+        else:
+            cls._shared_profile = QWebEngineProfile(storage_path)
+            cls._shared_profile.setPersistentStoragePath(storage_path)
+            cls._shared_profile.setCachePath(f"{storage_path}/cache")
+
+        cls._shared_adblocker = AdBlocker()
+        cls._shared_profile.setUrlRequestInterceptor(cls._shared_adblocker)
+        cls._profile_key = profile_key
+
+    @classmethod
+    def reset_profile(cls) -> None:
+        cls._shared_profile = None
+        cls._shared_adblocker = None
+        cls._profile_key = None
+
+    @classmethod
+    def set_adblock_enabled(cls, enabled: bool) -> None:
+        if cls._shared_adblocker:
+            cls._shared_adblocker.set_enabled(enabled)
