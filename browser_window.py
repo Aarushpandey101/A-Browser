@@ -1,9 +1,10 @@
 # browser_window.py
 
 from pathlib import Path
+from urllib.parse import quote_plus
 
-from PyQt6.QtCore import QUrl, Qt
-from PyQt6.QtGui import QColor, QPalette, QAction
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QAction, QColor, QPalette
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -28,7 +29,7 @@ from profiles import ProfileManager
 
 
 class BrowserWindow(QMainWindow):
-    """Main browser window with profile switcher, tab groups, and modern UI."""
+    """Main browser window with profile switcher, tab groups, modern UI and incognito."""
 
     GROUP_COLORS = {
         "Work": "#4f46e5",
@@ -42,13 +43,13 @@ class BrowserWindow(QMainWindow):
         super().__init__()
 
         self.current_profile = "default"
+        self.incognito_mode = False
         self.profile_manager = ProfileManager(self.current_profile)
         self.db = BrowserDatabase(str(self.profile_manager.database_path))
-        self.tab_groups: dict[int, str] = {}
+        self.tab_groups: dict[BrowserTab, str] = {}
 
         self.setWindowTitle("SuperBrowser")
         self.resize(1380, 900)
-
         self._apply_modern_theme()
 
         self.adblock_enabled = True
@@ -100,6 +101,7 @@ class BrowserWindow(QMainWindow):
                 border-radius: 16px;
                 padding: 8px 12px;
                 background: #ffffff;
+                min-width: 380px;
             }
             QComboBox {
                 border: 1px solid #d7deed;
@@ -108,6 +110,13 @@ class BrowserWindow(QMainWindow):
                 background: #ffffff;
                 min-width: 130px;
             }
+            QPushButton {
+                border: 1px solid #d7deed;
+                border-radius: 12px;
+                padding: 6px 10px;
+                background: #ffffff;
+            }
+            QPushButton:hover { background: #eef2ff; }
             QTabWidget::pane {
                 border: 1px solid #d7deed;
                 border-radius: 14px;
@@ -129,15 +138,15 @@ class BrowserWindow(QMainWindow):
         self.addToolBar(navbar)
 
         back_btn = QAction("←", self)
-        back_btn.triggered.connect(lambda: self.current_browser().back())
+        back_btn.triggered.connect(lambda: self.current_browser() and self.current_browser().back())
         navbar.addAction(back_btn)
 
         forward_btn = QAction("→", self)
-        forward_btn.triggered.connect(lambda: self.current_browser().forward())
+        forward_btn.triggered.connect(lambda: self.current_browser() and self.current_browser().forward())
         navbar.addAction(forward_btn)
 
         reload_btn = QAction("⟳", self)
-        reload_btn.triggered.connect(lambda: self.current_browser().reload())
+        reload_btn.triggered.connect(lambda: self.current_browser() and self.current_browser().reload())
         navbar.addAction(reload_btn)
 
         home_btn = QAction("Home", self)
@@ -154,9 +163,13 @@ class BrowserWindow(QMainWindow):
         self.profile_switcher.currentTextChanged.connect(self._switch_profile)
         navbar.addWidget(self.profile_switcher)
 
-        add_profile_btn = QPushButton("+ Profile")
-        add_profile_btn.clicked.connect(self._create_profile)
-        navbar.addWidget(add_profile_btn)
+        self.add_profile_btn = QPushButton("+ Profile")
+        self.add_profile_btn.clicked.connect(self._create_profile)
+        navbar.addWidget(self.add_profile_btn)
+
+        self.incognito_btn = QPushButton("Incognito: OFF")
+        self.incognito_btn.clicked.connect(self._toggle_incognito_mode)
+        navbar.addWidget(self.incognito_btn)
 
         new_tab_btn = QAction("+", self)
         new_tab_btn.triggered.connect(lambda: self.add_new_tab("newtab://home"))
@@ -184,17 +197,16 @@ class BrowserWindow(QMainWindow):
         self.profile_switcher.blockSignals(False)
 
     def _create_profile(self) -> None:
-        profile_name, ok = QInputDialog.getText(
-            self,
-            "Create Profile",
-            "Profile name:",
-        )
+        profile_name, ok = QInputDialog.getText(self, "Create Profile", "Profile name:")
+        if not ok:
+            return
+
         profile_name = profile_name.strip()
-        if not ok or not profile_name:
+        if not profile_name:
+            QMessageBox.warning(self, "Invalid Profile", "Profile name cannot be empty.")
             return
 
         ProfileManager(profile_name)
-        self.current_profile = profile_name
         self._refresh_profiles()
         self._switch_profile(profile_name)
 
@@ -209,22 +221,34 @@ class BrowserWindow(QMainWindow):
         BrowserTab.reset_profile()
         self.tab_groups.clear()
         self.tabs.clear()
+        self.add_new_tab("newtab://home")
 
+    def _toggle_incognito_mode(self) -> None:
+        self.incognito_mode = not self.incognito_mode
+        self.incognito_btn.setText(f"Incognito: {'ON' if self.incognito_mode else 'OFF'}")
+        self.profile_switcher.setEnabled(not self.incognito_mode)
+        self.add_profile_btn.setEnabled(not self.incognito_mode)
+
+        BrowserTab.reset_profile()
+        self.tab_groups.clear()
+        self.tabs.clear()
         self.add_new_tab("newtab://home")
 
     def add_new_tab(self, url: str | None = None) -> None:
-        if not isinstance(url, str):
-            url = "newtab://home"
+        target = url if isinstance(url, str) else "newtab://home"
+        browser_url = "about:blank" if target == "newtab://home" else target
 
-        browser = BrowserTab(url if url != "newtab://home" else "about:blank", str(self.profile_manager.storage_path))
+        browser = BrowserTab(
+            browser_url,
+            str(self.profile_manager.storage_path),
+            incognito=self.incognito_mode,
+        )
 
-        if url == "newtab://home":
+        if target == "newtab://home":
             browser.setHtml(self._new_tab_html())
 
         browser.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        browser.customContextMenuRequested.connect(
-            lambda pos: self._show_context_menu(browser, pos)
-        )
+        browser.customContextMenuRequested.connect(lambda pos: self._show_context_menu(browser, pos))
 
         index = self.tabs.addTab(browser, "New Tab")
         self.tabs.setCurrentIndex(index)
@@ -234,23 +258,27 @@ class BrowserWindow(QMainWindow):
         browser.page().profile().downloadRequested.connect(self.handle_download)
 
     def _new_tab_html(self) -> str:
-        return """
+        mode_label = "Incognito" if self.incognito_mode else f"Profile: {self.current_profile}"
+        sub_text = "No browsing history will be saved in this mode." if self.incognito_mode else "Fast browsing with profiles, grouped tabs, adblock and developer tools."
+        return f"""
         <html>
         <head>
             <style>
-                body {font-family: Arial, sans-serif; background: linear-gradient(135deg, #f6f8ff, #eefafc); color: #111827; margin:0;}
-                .wrap {max-width: 760px; margin: 80px auto; text-align: center;}
-                h1 {font-size: 52px; margin-bottom: 8px;}
-                p {color: #4b5563;}
-                .grid {display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 14px; margin-top: 24px;}
-                .card {background:#fff; border-radius:16px; padding:18px; box-shadow: 0 8px 24px rgba(0,0,0,0.06);}
-                a {text-decoration:none; color:#1d4ed8; font-weight:bold;}
+                body {{font-family: Arial, sans-serif; background: linear-gradient(135deg, #f6f8ff, #eefafc); color: #111827; margin:0;}}
+                .wrap {{max-width: 760px; margin: 80px auto; text-align: center;}}
+                .badge {{display:inline-block; background:#1f2937; color:#fff; border-radius:999px; padding:8px 14px; font-size:13px;}}
+                h1 {{font-size: 52px; margin: 16px 0 8px;}}
+                p {{color: #4b5563;}}
+                .grid {{display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 14px; margin-top: 24px;}}
+                .card {{background:#fff; border-radius:16px; padding:18px; box-shadow: 0 8px 24px rgba(0,0,0,0.06);}}
+                a {{text-decoration:none; color:#1d4ed8; font-weight:bold;}}
             </style>
         </head>
         <body>
             <div class="wrap">
+                <span class="badge">{mode_label}</span>
                 <h1>SuperBrowser</h1>
-                <p>Fast browsing with profiles, grouped tabs, adblock and developer tools.</p>
+                <p>{sub_text}</p>
                 <div class="grid">
                     <div class="card"><a href="https://www.google.com">Google</a></div>
                     <div class="card"><a href="https://github.com">GitHub</a></div>
@@ -263,49 +291,62 @@ class BrowserWindow(QMainWindow):
         """
 
     def close_tab(self, index: int) -> None:
-        if self.tabs.count() > 1:
-            self.tabs.removeTab(index)
-            self.tab_groups.pop(index, None)
-        else:
+        if self.tabs.count() <= 1:
             QMessageBox.warning(self, "Warning", "Cannot close last tab.")
+            return
 
-    def current_browser(self) -> BrowserTab:
-        return self.tabs.currentWidget()
+        browser = self.tabs.widget(index)
+        if isinstance(browser, BrowserTab):
+            self.tab_groups.pop(browser, None)
+        self.tabs.removeTab(index)
+
+    def current_browser(self) -> BrowserTab | None:
+        browser = self.tabs.currentWidget()
+        return browser if isinstance(browser, BrowserTab) else None
 
     def _handle_url_entered(self) -> None:
-        url = self.url_bar.text().strip()
-        self._navigate_to(url)
+        self._navigate_to(self.url_bar.text().strip())
 
     def _navigate_to(self, url: str) -> None:
-        if url in {"newtab", "newtab://home", "home"}:
-            self.current_browser().setHtml(self._new_tab_html())
+        browser = self.current_browser()
+        if browser is None:
             return
-        if not url.startswith("http"):
-            url = f"https://www.google.com/search?q={url.replace(' ', '+')}"
-        self.current_browser().load(QUrl(url))
+
+        if url in {"newtab", "newtab://home", "home"}:
+            browser.setHtml(self._new_tab_html())
+            return
+
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = f"https://www.google.com/search?q={quote_plus(url)}"
+
+        browser.load(QUrl(url))
 
     def _update_url_bar(self) -> None:
         browser = self.current_browser()
-        if browser:
-            self.url_bar.setText(browser.url().toString())
+        self.url_bar.setText(browser.url().toString() if browser else "")
 
     def _on_page_loaded(self, browser: BrowserTab) -> None:
         title = browser.page().title() or "New Tab"
         url = browser.url().toString()
 
-        if url.startswith("http"):
+        if not self.incognito_mode and url.startswith("http"):
             self.db.add_history(url, title)
 
         index = self.tabs.indexOf(browser)
-        if index != -1:
-            group_label = self.tab_groups.get(index)
-            tab_title = f"[{group_label}] {title}" if group_label else title
-            self.tabs.setTabText(index, tab_title)
-            self._paint_group(index)
+        if index == -1:
+            return
+
+        group = self.tab_groups.get(browser)
+        self.tabs.setTabText(index, f"[{group}] {title}" if group else title)
+        self._paint_group(index, group)
 
     def _show_tab_context_menu(self, pos) -> None:
         index = self.tabs.tabBar().tabAt(pos)
         if index < 0:
+            return
+
+        browser = self.tabs.widget(index)
+        if not isinstance(browser, BrowserTab):
             return
 
         menu = QMenu(self)
@@ -313,39 +354,33 @@ class BrowserWindow(QMainWindow):
         for group_name in self.GROUP_COLORS:
             action = QAction(group_name, self)
             action.triggered.connect(
-                lambda _checked, i=index, g=group_name: self._assign_tab_group(i, g)
+                lambda _checked, b=browser, g=group_name: self._assign_tab_group(b, g)
             )
             group_menu.addAction(action)
 
         clear_action = QAction("Remove from Group", self)
-        clear_action.triggered.connect(lambda: self._assign_tab_group(index, None))
+        clear_action.triggered.connect(lambda: self._assign_tab_group(browser, None))
         menu.addAction(clear_action)
         menu.exec(self.tabs.tabBar().mapToGlobal(pos))
 
-    def _assign_tab_group(self, index: int, group_name: str | None) -> None:
+    def _assign_tab_group(self, browser: BrowserTab, group_name: str | None) -> None:
         if group_name:
-            self.tab_groups[index] = group_name
+            self.tab_groups[browser] = group_name
         else:
-            self.tab_groups.pop(index, None)
-        browser = self.tabs.widget(index)
-        if browser:
-            self._on_page_loaded(browser)
+            self.tab_groups.pop(browser, None)
+        self._on_page_loaded(browser)
 
-    def _paint_group(self, index: int) -> None:
-        group = self.tab_groups.get(index)
-        if not group:
-            self.tabs.tabBar().setTabTextColor(index, QColor("#1f2937"))
-            return
-        self.tabs.tabBar().setTabTextColor(index, QColor(self.GROUP_COLORS[group]))
+    def _paint_group(self, index: int, group: str | None) -> None:
+        color = QColor(self.GROUP_COLORS[group]) if group else QColor("#1f2937")
+        self.tabs.tabBar().setTabTextColor(index, color)
 
     def toggle_adblock(self) -> None:
         self.adblock_enabled = not self.adblock_enabled
         BrowserTab.set_adblock_enabled(self.adblock_enabled)
-
         state = "ON" if self.adblock_enabled else "OFF"
         self.adblock_btn.setText(f"AdBlock: {state}")
-
-        self.current_browser().reload()
+        if self.current_browser():
+            self.current_browser().reload()
 
     def _create_devtools_panel(self) -> None:
         self.devtools_dock = QDockWidget("DevTools", self)
@@ -356,25 +391,24 @@ class BrowserWindow(QMainWindow):
 
     def toggle_devtools(self) -> None:
         browser = self.current_browser()
-        if not browser:
+        if browser is None:
             return
 
         if self.devtools_dock.isVisible():
             self.devtools_dock.hide()
-        else:
-            browser.page().setDevToolsPage(self.devtools_view.page())
-            self.devtools_dock.show()
+            return
 
-    def _show_context_menu(self, browser, pos) -> None:
+        browser.page().setDevToolsPage(self.devtools_view.page())
+        self.devtools_dock.show()
+
+    def _show_context_menu(self, browser: BrowserTab, pos) -> None:
         menu = QMenu()
-
         inspect_action = QAction("Inspect Element", self)
         inspect_action.triggered.connect(lambda: self._inspect_element(browser))
-
         menu.addAction(inspect_action)
         menu.exec(browser.mapToGlobal(pos))
 
-    def _inspect_element(self, browser) -> None:
+    def _inspect_element(self, browser: BrowserTab) -> None:
         self.devtools_dock.show()
         browser.page().setDevToolsPage(self.devtools_view.page())
 
@@ -389,20 +423,13 @@ class BrowserWindow(QMainWindow):
         self.download_dock.hide()
 
     def handle_download(self, download) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save File",
-            download.downloadFileName(),
-        )
-
+        path, _ = QFileDialog.getSaveFileName(self, "Save File", download.downloadFileName())
         if not path:
             download.cancel()
             return
 
-        if "\\" in path:
-            directory, filename = path.rsplit("\\", 1)
-        else:
-            directory, filename = path.rsplit("/", 1)
+        separator = "\\" if "\\" in path else "/"
+        directory, filename = path.rsplit(separator, 1)
 
         download.setDownloadDirectory(directory)
         download.setDownloadFileName(filename)
