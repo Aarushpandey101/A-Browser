@@ -30,6 +30,11 @@ class BrowserTab(QWebEngineView):
         self.load(QUrl(url))
 
     @classmethod
+    def reset_profile(cls) -> None:
+        cls._shared_profile = None
+        cls._shared_adblocker = None
+
+    @classmethod
     def set_adblock_enabled(cls, enabled: bool) -> None:
         if cls._shared_adblocker:
             cls._shared_adblocker.set_enabled(enabled)
